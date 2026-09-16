@@ -26,8 +26,9 @@
 | `transcribe-all.ps1` | пакетная транскрибация всех новых файлов папки |
 | `zoom_state.py` | БД состояния обработки (SQLite `state.db`): `sync` / `pending` / `mark` / `status` |
 | `prompt-konspekt.md` | шаблон промпта конспекта |
-| `README.md` | документация |
 | `install.ps1` | установка |
+
+> `README.md` — в корне проекта (`D:\video_cast\zoom\README.md`).
 
 ## Ключевые технические факты
 

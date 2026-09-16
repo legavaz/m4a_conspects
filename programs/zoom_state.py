@@ -27,7 +27,7 @@ from datetime import datetime
 ROOT = r"D:\video_cast\zoom"
 DB_PATH = os.path.join(ROOT, "state.db")
 MEDIA_EXTS = {".m4a", ".webm", ".mp4", ".mp3", ".wav", ".ogg", ".m4b"}
-STATUSES = ("new", "transcribed", "done", "deleted")
+STATUSES = ("new", "transcribed", "done", "ignored", "deleted")
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -118,6 +118,13 @@ def cmd_sync(args):
             added += 1
             continue
 
+        if row["status"] == "ignored":
+            # помеченные "не обрабатывать" не трогаем, кроме size/mtime
+            if row["size_bytes"] != size or row["mtime"] != mtime:
+                conn.execute("UPDATE files SET size_bytes=?,mtime=? WHERE id=?",
+                             (size, mtime, row["id"]))
+            continue
+
         if row["size_bytes"] != size or row["mtime"] != mtime:
             # файл изменился (перезаписан) -> сброс состояния по факту файлов
             conn.execute(
@@ -185,7 +192,7 @@ def cmd_pending(args):
     print(f"Готово к конспекту ({len(ready)}):")
     for p in ready:
         print("  -", rel(p))
-    order = ["new", "transcribed", "done", "deleted"]
+    order = ["new", "transcribed", "done", "ignored", "deleted"]
     print("Статусы: " + ", ".join(f"{s}={counts.get(s, 0)}" for s in order))
 
 
