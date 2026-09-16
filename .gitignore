@@ -1,0 +1,33 @@
+# Данные по дням (папки ГГГГ-ММ-ДД) — записи, транскрипты, конспекты
+/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+
+# Модели whisper (большие файлы)
+/models/
+
+# База состояния обработки (SQLite)
+/state.db
+/state.db-journal
+/state.db-wal
+/state.db-shm
+
+# Логи
+/recorder.log
+/recorder.log.*
+
+# Настройки OpenCode
+/.opencode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Медиа и производные транскрибации (страховка)
+*.m4a
+*.webm
+*.mp4
+*.mp3
+*.wav
+*.ogg
+*.m4b
+*.txt
+*.srt
