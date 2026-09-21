@@ -19,9 +19,11 @@
 |---|---|
 | `zoom_recorder.py` | основной скрипт-наблюдатель и рекордер |
 | `install.ps1` | установка зависимостей и настройка автозапуска «с нуля» |
-| `transcribe.ps1` | локальная транскрибация одной записи (whisper.cpp, без облака) |
+| `transcribe.ps1` | локальная транскрибация одной записи (движки: NVIDIA Nemotron 3.5 ASR / whisper.cpp, без облака) |
 | `transcribe-all.ps1` | пакетная транскрибация всех новых записей в папке |
 | `zoom_state.py` | БД состояния обработки (SQLite): sync / pending / mark / status |
+| `konspekt.ps1` (корень проекта) | автономный (headless) запуск конспекта: `opencode run` + команда `/konspekt` |
+| `.opencode\command\konspekt.md` | команда opencode (промпт) для конспекта; текст — по регламенту `prompt-konspekt.md` |
 | `prompt-konspekt.md` | стандартный промпт для конспекта встречи (opencode) |
 | `README.md` | этот файл |
 
@@ -49,21 +51,28 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 ## Конспект встречи (транскрибация + суммаризация)
 
-Транскрибация — полностью локальная (токены LLM не расходуются):
+Транскрибация — полностью локальная (токены LLM не расходуются). Доступны **два движка**:
+
+- **Nemotron 3.5 ASR** (по умолчанию) — NVIDIA, `nemo-speech` (NeMo-Speech.cpp, нативный C++/ggml). Быстрее (~0.5x realtime на CPU), но на русской речи с именами/1С-терминами может терять точность (модель 0.6B).
+- **whisper.cpp** (`-Engine whisper`) — точнее на русском (large-v3-turbo, 809M), но медленнее (~0.9x realtime). Используется как автоматический резерв при сбое Nemotron.
 
 ```powershell
-# одна запись
+# одна запись (по умолчанию Nemotron)
 powershell -ExecutionPolicy Bypass -File transcribe.ps1 "D:\video_cast\zoom\ГГГГ-ММ-ДД\Zoom_....m4a"
+# принудительно whisper
+powershell -ExecutionPolicy Bypass -File transcribe.ps1 "D:\video_cast\zoom\ГГГГ-ММ-ДД\Zoom_....m4a" -Engine whisper
 # вся папка (все новые записи)
 powershell -ExecutionPolicy Bypass -File transcribe-all.ps1 "D:\video_cast\zoom\ГГГГ-ММ-ДД"
 ```
 
-- Модель по умолчанию `ggml-large-v3-turbo` (лежит в `D:\video_cast\zoom\models`; при отсутствии скачается автоматически). Черновой быстрый вариант: `-Model ggml-small.bin`.
+- **Nemotron**: модель `nemotron-3.5` (GGUF Q8 ~707 МБ) лежит в `D:\video_cast\zoom\models` (подкаталог `nvidia\...`). Опции: `-NemoModel` (имя/путь), `-NemoDevice` (по умолч. `cpu`; `auto|cuda|vulkan`), язык — `-Lang` (`ru`). SRT-куски дробятся по границам предложений/пауз; `.txt` собирается из `.srt` одним проходом.
+- **whisper**: модель по умолчанию `ggml-large-v3-turbo` (лежит в `D:\video_cast\zoom\models`; при отсутствии скачается автоматически). Черновой быстрый вариант: `-Model ggml-small.bin`. Опции: `-NoVad`, `-Retries`, `-ChunkSeconds`, `-NoFallback`.
 - Вход: `m4a`, `webm`, `mp4`, `mp3`, `wav`, `ogg`, `m4b` (декодирует ffmpeg).
-- Результат: `<имя>.txt` и `<имя>.srt` (таймкоды) рядом с записью. Час встречи на CPU ≈ 15–20 мин (turbo).
-- Надёжность: при сбое whisper-cli — автоповторы (`-Retries`), затем фолбэк (нарезка `-ChunkSeconds` + `ggml-small`) со склейкой `.txt`/`.srt`.
+- Результат: `<имя>.txt` и `<имя>.srt` (таймкоды) рядом с записью.
+- Надёжность whisper: при сбое — автоповторы (`-Retries`), затем фолбэк (нарезка `-ChunkSeconds` + `ggml-small`) со склейкой `.txt`/`.srt`. При сбое Nemotron — автооткат на whisper (если не указан `-NoFallback`).
 - Конспект делает opencode (LLM): в чате **`Конспект: <путь к .m4a>`** (или **`Конспект: <папка>`**) → транскрибация → Markdown-конспект (участники, темы с таймкодами из `.srt`, решения, ❗важное с ==подсветкой==) сохраняется рядом с аудио и в Obsidian `Обсидиан/Встречи Zoom/ГГГГ/ММ/ГГГГ-ММ-ДД/ЧЧ-ММ — тема.md`.
 - Полный текст промпта: `prompt-konspekt.md`.
+- **Автономный запуск (без чата)**: `powershell -ExecutionPolicy Bypass -File konspekt.ps1 [-Target <папка|файл>] [-NoPause]` — запускает `opencode run --agent build --auto --command konspekt` и обрабатывает все готовые записи из `pending`; без `-Target` — весь проект, `-NoPause` — не ждать Enter (для планировщика).
 
 ## Состояние обработки (SQLite)
 

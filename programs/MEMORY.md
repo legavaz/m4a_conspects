@@ -12,21 +12,28 @@
 - Windows, Python 3.14.6, ffmpeg 8.1.1, PowerShell 5.1.
 - CPU Xeon E5-2680 v4 (14 ядер / 28 потоков), 32 ГБ ОЗУ.
 - whisper-cli v1.8.2: `C:\Users\lega\.cache\opencode-voice\engines\whisper.cpp\win32-x64\whisper-cli.exe`
+- **NeMo-Speech.cpp 0.1.0** (`nemo-speech`, CPU-бэкенд): `C:\Users\lega\AppData\Local\Programs\NeMoSpeech\bin\nemo-speech.exe`
+  (установлен через `scripts/install.ps1 -Backend cpu`; на машине есть `nvidia-smi`, но драйвер не рабочий → CUDA-сборку не использовать)
 - Модели: `D:\video_cast\zoom\models`
-  - `ggml-large-v3-turbo.bin` (1549,3 МБ) — дефолт
-  - `ggml-small.bin` (465 МБ) — фолбэк для длинных/падающих файлов
-  - `ggml-silero-v5.1.2.bin` (0,8 МБ) — VAD, скачивается автоматически
+  - `ggml-large-v3-turbo.bin` (1549,3 МБ) — whisper, дефолт whisper-ветки
+  - `ggml-small.bin` (465 МБ) — фолбэк whisper
+  - `ggml-silero-v5.1.2.bin` (0,8 МБ) — VAD whisper
+  - Nemotron 3.5 GGUF (Q8 ~707 МБ): `models\nvidia\nemotron-3.5-asr-streaming-0.6b\1c8deaecc64b91f034d73e08dd8b64625eb3395d\nemotron-3.5-asr-streaming-0.6b.q8_0.gguf`
+    (кэш CLI переопределён через `NEMO_SPEECH_MODEL_DIR=models`, чтобы модель лежала в проекте)
 
 ## Файлы программ (`D:\video_cast\zoom\programs`)
 
 | Файл | Назначение |
 |---|---|
 | `zoom_recorder.py` | запись Zoom-аудио в M4A (по папкам `D:\video_cast\zoom\ГГГГ-ММ-ДД\`); лог с ротацией (1 МБ × 3) |
-| `transcribe.ps1` | транскрибация одного файла: ffmpeg → WAV 16 кГц моно → whisper-cli (`-l ru`, `--vad`, `-t 14`); выдаёт `.txt` + `.srt`; автоповтор и фолбэк |
+| `transcribe.ps1` | транскрибация одного файла: ffmpeg → WAV 16 кГц моно → движок (`-Engine`: nemotron по умолч. | whisper); выдаёт `.txt` + `.srt`; откат nemotron→whisper при сбое |
 | `transcribe-all.ps1` | пакетная транскрибация всех новых файлов папки |
 | `zoom_state.py` | БД состояния обработки (SQLite `state.db`): `sync` / `pending` / `mark` / `status` / `session` |
 | `prompt-konspekt.md` | шаблон промпта конспекта |
 | `install.ps1` | установка |
+
+> `konspekt.ps1` — в корне проекта (`D:\video_cast\zoom\konspekt.ps1`): headless-запуск конспекта
+> (`opencode run --agent build --auto --command konspekt [путь]`), команда — `.opencode\command\konspekt.md`.
 
 > `README.md` — в корне проекта (`D:\video_cast\zoom\README.md`).
 
@@ -45,6 +52,12 @@
 - Русского SAPI-голоса нет (только Microsoft Zira Desktop en-US) — тесты делались английской речью.
 - **Копирование в Obsidian**: после записи проверять, что заметка реально создана с расширением `.md` и не 0 байт —
   18.09 обнаружен артефакт «10-01 — Оперативка» (пустой файл без расширения) рядом с настоящими заметками.
+- **Автозапуск конспекта (konspekt.ps1)**: `opencode run --agent build --auto --command konspekt <цель>`;
+  кастомные команды opencode — `.opencode\command\<имя>.md` (+ поддержка `commands\`), `$ARGUMENTS` = аргументы
+  вызова (проверено на 1.18.31). `konspekt.ps1` — только ASCII: кириллица в `.ps1` требует UTF-8 BOM,
+  а русский текст живёт в `.opencode\command\konspekt.md`.
+  Нюанс PowerShell 5.1: `$PSScriptRoot` в default-значении `param()` при запуске `-File` пуст — вычислять в теле.
+  ❗ Папка `.opencode/` в `.gitignore` — команда `konspekt.md` не версионируется (локальная).
 
 ## Состояние обработки (SQLite)
 
@@ -58,7 +71,7 @@
 - `pending` → `no_transcript` (пропускаем) и `ready_for_konspekt` (готово к конспекту; сгруппировано по сессиям).
 - **Правило: транскрибацию не запускать автоматически.** Файлы без транскрипта пропускаем; при необходимости — сначала спросить пользователя.
 - После конспекта: `session done <id>` для сессии или `mark "<аудио>" done --konspekt .. --obsidian ..` для одиночного файла.
-- Текущее состояние (2026-09-18, вечер): обработаны 15.09–18.09, `pending` пуст (остался только webm 14.09 без транскрипта).
+- Текущее состояние (2026-09-21): обработаны 15.09–21.09, `pending` пуст (остался только webm 14.09 без транскрипта).
   Сессии: 15.09 (OpenCode 15:00+15:43), 17.09 (моб. приложение 10:58+11:39), 18.09 (оперативка 10:01+10:39+11:19+12:00),
   18.09 (ЗУП/структура 15:46+16:24, сессия #5, объединена вручную — зазор ~38 мин > гэпа 30 с).
   Урок: `sync` в момент запуска мог не видеть свежие `.srt`/`.txt` — после транскрибации всегда перезапускать `sync` перед `pending`.
@@ -104,6 +117,7 @@
 | 2026-09-18 10:01 | 2:35:00 | `Zoom_20260918_100114.m4a` + `...103937.m4a` + `...111949.m4a` + `...120002.m4a` | Оперативка, замена номенклатуры, статусы задач (сессия) |
 | 2026-09-18 15:00 | 24:49 | `Zoom_20260918_150036.m4a` | Планирование спринта |
 | 2026-09-18 15:46 | 56:28 | `Zoom_20260918_154611.m4a` + `...162412.m4a` | Переход на ЗУП Corp: управленческая структура (сессия #5) |
+| 2026-09-21 09:53 | 15:26 | `Zoom_20260921_095315.m4a` | Взаимодействие с Денисом и доступ к конфигуратору (RDP) |
 | 2024-09-03 19:12 | 11:56 | `audio1184869161.m4a` | Учёт корректировок реализации |
 | 2024-08-29 19:26 | 29:21 | `audio1169397921.m4a` | Распределение платежей и реализаций |
 | 2024-08-29 20:18 | 36:54 | `audio1522070279.m4a` | Пошаговый разбор проводок |
@@ -111,14 +125,18 @@
 
 ## Параметры транскрибации
 
-- Дефолт: `ggml-large-v3-turbo.bin`.
-- Длинные/падающие файлы: автоматический фолбэк в `transcribe.ps1` (`ggml-small.bin` + нарезка).
+- **Движок по умолчанию — Nemotron 3.5 ASR** (`-Engine nemotron`), резерв — whisper.
+  Команда: `nemo-speech transcribe <wav> --model nemotron-3.5 --language ru --device cpu --format srt --output <файл>.srt`
+  (SRT-куски по границам предложений/пауз; `.txt` собирается из `.srt` функцией `Get-TxtFromSrt`).
+- whisper: `ggml-large-v3-turbo.bin` по умолч.; быстрый черновой — `-Model ggml-small.bin`.
 - whisper-cli v1.8.2, `-l ru`, `--vad -vm <модель>`, `-t 14` (потоков), `-otxt -osrt`.
-- Пакетно: `transcribe-all.ps1 [-Path <папка>] [-Model ...] [-DeleteTxt] [-Force]`.
+- Пакетно: `transcribe-all.ps1 [-Path <папка>] [-Engine nemotron|whisper] [-Model ...] [-DeleteTxt] [-Force]`.
+- **Внимание**: `2>&1` в `transcribe.ps1` на stderr nemo-speech даёт терминирующие ошибки при
+  `$ErrorActionPreference="Stop"` — НЕ перенаправлять stderr движка через `2>&1` в этой функции.
 
 ## Открытые задачи / заметки
 
 - Необработанные записи: `2026-09-14\Запись встречи 01.09.2026 17-00-34 - запись.webm` (видео 497 МБ, без транскрипта).
-- Все записи 2026-09-15…18 обработаны (конспекты рядом с аудио и в Obsidian), `pending` пуст.
+- Все записи 2026-09-15…21 обработаны (конспекты рядом с аудио и в Obsidian), `pending` пуст.
 - Требование налоговой за полугодие (расхождения «выручка НДС / прибыль») — из встречи 03.09 18:40, открыто.
 - Пустые папки без аудио: `2024-08-29 16.21.43`, `2024-08-29 16.59.43`.

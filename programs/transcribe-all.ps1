@@ -10,14 +10,21 @@
 
     Опции:
         -Path      папка с записями
-        -Model     модель (по умолчанию ggml-large-v3-turbo.bin)
+        -Engine    nemotron (по умолчанию) | whisper
+        -Model     whisper: модель (по умолчанию ggml-large-v3-turbo.bin)
+        -NemoModel nemotron: имя/путь GGUF (по умолчанию nemotron-3.5)
+        -NemoDevice nemotron: cpu (по умолчанию) | auto | cuda | vulkan
         -DeleteTxt удалять .txt после транскрибации (оставить .srt с таймкодами)
         -NoVad     отключить Voice Activity Detection
         -Force     перетранскрибировать даже если .txt уже есть
 #>
 param(
     [string]$Path = "",
+    [ValidateSet("nemotron", "whisper")]
+    [string]$Engine = "nemotron",
     [string]$Model = "ggml-large-v3-turbo.bin",
+    [string]$NemoModel = "nemotron-3.5",
+    [string]$NemoDevice = "cpu",
     [switch]$DeleteTxt,
     [switch]$NoVad,
     [switch]$Force
@@ -51,7 +58,10 @@ foreach ($f in $files) {
         continue
     }
     Write-Host ("`n=== {0} ===" -f $f.Name) -ForegroundColor Magenta
-    $passArgs = @("-File", "`"$($f.FullName)`"", "-Model", $Model)
+    $passArgs = @("-File", "`"$($f.FullName)`"", "-Engine", $Engine, "-Model", $Model)
+    if ($Engine -eq "nemotron") {
+        $passArgs += @("-NemoModel", $NemoModel, "-NemoDevice", $NemoDevice)
+    }
     if ($DeleteTxt) { $passArgs += "-DeleteTxt" }
     if ($NoVad)     { $passArgs += "-NoVad" }
     & powershell -NoProfile -ExecutionPolicy Bypass -File $Script @passArgs
