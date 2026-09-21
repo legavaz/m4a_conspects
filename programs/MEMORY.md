@@ -30,10 +30,11 @@
 | `transcribe-all.ps1` | пакетная транскрибация всех новых файлов папки |
 | `zoom_state.py` | БД состояния обработки (SQLite `state.db`): `sync` / `pending` / `mark` / `status` / `session` |
 | `prompt-konspekt.md` | шаблон промпта конспекта |
+| `konspekt-command.md` | промпт автономного конспекта (используется `konspekt.ps1`) |
 | `install.ps1` | установка |
 
 > `konspekt.ps1` — в корне проекта (`D:\video_cast\zoom\konspekt.ps1`): headless-запуск конспекта
-> (`opencode run --agent build --auto --command konspekt [путь]`), команда — `.opencode\command\konspekt.md`.
+> (`opencode run --agent build --auto` с промптом из `programs\konspekt-command.md`).
 
 > `README.md` — в корне проекта (`D:\video_cast\zoom\README.md`).
 
@@ -52,12 +53,13 @@
 - Русского SAPI-голоса нет (только Microsoft Zira Desktop en-US) — тесты делались английской речью.
 - **Копирование в Obsidian**: после записи проверять, что заметка реально создана с расширением `.md` и не 0 байт —
   18.09 обнаружен артефакт «10-01 — Оперативка» (пустой файл без расширения) рядом с настоящими заметками.
-- **Автозапуск конспекта (konspekt.ps1)**: `opencode run --agent build --auto --command konspekt <цель>`;
-  кастомные команды opencode — `.opencode\command\<имя>.md` (+ поддержка `commands\`), `$ARGUMENTS` = аргументы
-  вызова (проверено на 1.18.31). `konspekt.ps1` — только ASCII: кириллица в `.ps1` требует UTF-8 BOM,
-  а русский текст живёт в `.opencode\command\konspekt.md`.
+- **Автозапуск конспекта (konspekt.ps1)**: `opencode run --agent build --auto` с промптом
+  «Read programs/konspekt-command.md ... Target: <цель>»; сам `konspekt.ps1` — только ASCII
+  (кириллица в `.ps1` требует UTF-8 BOM), русский текст — в `programs\konspekt-command.md`
+  (трекается git) поверх регламента `programs\prompt-konspekt.md`.
   Нюанс PowerShell 5.1: `$PSScriptRoot` в default-значении `param()` при запуске `-File` пуст — вычислять в теле.
-  ❗ Папка `.opencode/` в `.gitignore` — команда `konspekt.md` не версионируется (локальная).
+  Кастомные команды opencode из `.opencode\command\` (`--command <имя>`, `$ARGUMENTS`, проверено на 1.18.31)
+  рабочие, но папка `.opencode/` в `.gitignore` — поэтому командный промпт хранится в `programs\`.
 
 ## Состояние обработки (SQLite)
 

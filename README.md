@@ -22,8 +22,8 @@
 | `transcribe.ps1` | локальная транскрибация одной записи (движки: NVIDIA Nemotron 3.5 ASR / whisper.cpp, без облака) |
 | `transcribe-all.ps1` | пакетная транскрибация всех новых записей в папке |
 | `zoom_state.py` | БД состояния обработки (SQLite): sync / pending / mark / status |
-| `konspekt.ps1` (корень проекта) | автономный (headless) запуск конспекта: `opencode run` + команда `/konspekt` |
-| `.opencode\command\konspekt.md` | команда opencode (промпт) для конспекта; текст — по регламенту `prompt-konspekt.md` |
+| `konspekt.ps1` (корень проекта) | автономный (headless) запуск конспекта через `opencode run` |
+| `konspekt-command.md` | промпт автономного конспекта (вызывается `konspekt.ps1` по регламенту `prompt-konspekt.md`) |
 | `prompt-konspekt.md` | стандартный промпт для конспекта встречи (opencode) |
 | `README.md` | этот файл |
 
@@ -72,7 +72,7 @@ powershell -ExecutionPolicy Bypass -File transcribe-all.ps1 "D:\video_cast\zoom\
 - Надёжность whisper: при сбое — автоповторы (`-Retries`), затем фолбэк (нарезка `-ChunkSeconds` + `ggml-small`) со склейкой `.txt`/`.srt`. При сбое Nemotron — автооткат на whisper (если не указан `-NoFallback`).
 - Конспект делает opencode (LLM): в чате **`Конспект: <путь к .m4a>`** (или **`Конспект: <папка>`**) → транскрибация → Markdown-конспект (участники, темы с таймкодами из `.srt`, решения, ❗важное с ==подсветкой==) сохраняется рядом с аудио и в Obsidian `Обсидиан/Встречи Zoom/ГГГГ/ММ/ГГГГ-ММ-ДД/ЧЧ-ММ — тема.md`.
 - Полный текст промпта: `prompt-konspekt.md`.
-- **Автономный запуск (без чата)**: `powershell -ExecutionPolicy Bypass -File konspekt.ps1 [-Target <папка|файл>] [-NoPause]` — запускает `opencode run --agent build --auto --command konspekt` и обрабатывает все готовые записи из `pending`; без `-Target` — весь проект, `-NoPause` — не ждать Enter (для планировщика).
+- **Автономный запуск (без чата)**: `powershell -ExecutionPolicy Bypass -File konspekt.ps1 [-Target <папка|файл>] [-NoPause]` — запускает `opencode run --agent build --auto` с промптом из `programs\konspekt-command.md` и обрабатывает все готовые записи из `pending`; без `-Target` — весь проект, `-NoPause` — не ждать Enter (для планировщика).
 
 ## Состояние обработки (SQLite)
 

@@ -9,6 +9,10 @@
 /state.db-journal
 /state.db-wal
 /state.db-shm
+/programs/state.db
+/programs/state.db-journal
+/programs/state.db-wal
+/programs/state.db-shm
 
 # Логи
 /recorder.log

@@ -1,5 +1,5 @@
 # konspekt.ps1 - headless runner for the opencode "konspekt" workflow
-# Regulation / prompt: programs\prompt-konspekt.md ; command: .opencode\command\konspekt.md
+# Regulation: programs\prompt-konspekt.md ; launch prompt: programs\konspekt-command.md
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File konspekt.ps1 [-Target <folder|file>] [-NoPause]
@@ -37,10 +37,10 @@ if (-not (Test-Path -LiteralPath $Target)) {
 $Target = (Resolve-Path -LiteralPath $Target).Path
 
 Write-Host ''
-Write-Host ('[konspekt] opencode run --agent build --auto --command konspekt "' + $Target + '"') -ForegroundColor Cyan
+Write-Host ('[konspekt] opencode run --agent build --auto (prompt: programs\konspekt-command.md) target: "' + $Target + '"') -ForegroundColor Cyan
 Write-Host ''
 
-& opencode run --agent build --auto --command konspekt $Target
+& opencode run --agent build --auto "Read programs/konspekt-command.md in full and follow it exactly. Target: $Target"
 $rc = $LASTEXITCODE
 
 Write-Host ''
