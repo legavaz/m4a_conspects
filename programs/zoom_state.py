@@ -11,8 +11,13 @@
     sync                 обход папок, сверка с БД (детект изменений по size/mtime,
                          докрутка статусов из файлов: _конспект.md / .txt / .srt)
     pending [--json]     что нужно сделать: без транскрипта (пропуск) и готово к конспекту
-    mark <файл> <статус> проставить статус: new|transcribed|done|deleted
+    mark <файл> <статус> проставить статус: new|transcribed|no_speech|done|ignored|deleted
                          [--konspekt PATH] [--obsidian PATH]
+    publish <конспект> --obsidian PATH
+                         детерминированная публикация готового конспекта в Obsidian:
+                         копирует файл в vault, ставит obsidian_path и статус done
+                         (файла — или всем участникам сессии). LLM-скриптам нельзя писать
+                         заметку в Obsidian второй раз — отсюда дубли.
     status               сводка по статусам + последние конспекты
 
 БД: D:\\video_cast\\zoom\\state.db
@@ -21,15 +26,17 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta
 
 ROOT = r"D:\video_cast\zoom"
+VAULT = r"E:\Обсидиан\Обсидиан"          # корень vault Obsidian (там .obsidian)
 DB_PATH = os.path.join(ROOT, "state.db")
 MEDIA_EXTS = {".m4a", ".webm", ".mp4", ".mp3", ".wav", ".ogg", ".m4b"}
-STATUSES = ("new", "transcribed", "done", "ignored", "deleted")
+STATUSES = ("new", "transcribed", "no_speech", "done", "ignored", "deleted")
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -104,6 +111,37 @@ def parse_start(filename):
         return None
 
 
+def has_transcript(base):
+    """Транскрипт считается только если .txt/.srt существует и НЕ пустой (0 байт = речи нет)."""
+    for ext in (".txt", ".srt"):
+        p = base + ext
+        if os.path.exists(p):
+            try:
+                if os.path.getsize(p) > 0:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def is_silent(base):
+    """Оба файла .txt и .srt созданы, но пустые: движок отработал, речи не нашёл.
+
+    Такой файл нельзя оставлять в очереди 'new' — иначе hourly будет
+    транскрибировать его каждый час (наблюдалось 64 прогона одного файла).
+    """
+    sizes = []
+    for ext in (".txt", ".srt"):
+        p = base + ext
+        if not os.path.exists(p):
+            return False
+        try:
+            sizes.append(os.path.getsize(p))
+        except OSError:
+            return False
+    return all(s == 0 for s in sizes)
+
+
 def derive_status(media_path, session_konspekt=None):
     """Статус по файлам рядом с аудио (или по конспекту сессии). (status, konspekt_path)."""
     base = os.path.splitext(media_path)[0]
@@ -112,7 +150,9 @@ def derive_status(media_path, session_konspekt=None):
         return "done", konspekt
     if session_konspekt and os.path.exists(session_konspekt):
         return "done", session_konspekt
-    if os.path.exists(base + ".txt") or os.path.exists(base + ".srt"):
+    if is_silent(base):
+        return "no_speech", None
+    if has_transcript(base):
         return "transcribed", None
     return "new", None
 
@@ -125,14 +165,30 @@ def session_konspekt(conn, session_id):
     return row["konspekt_path"] if row else None
 
 
-def iter_media():
-    """Все медиа-файлы в корне и в папках-днях (ГГГГ-ММ-ДД)."""
-    dirs = [ROOT]
+def iter_day_dirs():
+    """Папки-дни: ROOT/ГГГГ/ММ/ГГГГ-ММ-ДД (и легаси-формат ROOT/ГГГГ-ММ-ДД)."""
+    day_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     for name in sorted(os.listdir(ROOT)):
         d = os.path.join(ROOT, name)
-        if os.path.isdir(d) and len(name) == 10 and name[4] == "-" and name[7] == "-":
-            dirs.append(d)
-    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        if day_re.match(name):
+            yield d
+        elif re.match(r"^\d{4}$", name):
+            for mm in sorted(os.listdir(d)):
+                md = os.path.join(d, mm)
+                if not (os.path.isdir(md) and re.match(r"^\d{2}$", mm)):
+                    continue
+                for dd in sorted(os.listdir(md)):
+                    pd = os.path.join(md, dd)
+                    if os.path.isdir(pd) and day_re.match(dd):
+                        yield pd
+
+
+def iter_media():
+    """Все медиа-файлы в папках-днях (ROOT/ГГГГ/ММ/ГГГГ-ММ-ДД) и в корне."""
+    for day_dir in [None, *iter_day_dirs()]:
+        d = day_dir or ROOT
         for fn in sorted(os.listdir(d)):
             p = os.path.join(d, fn)
             if os.path.isfile(p) and os.path.splitext(fn)[1].lower() in MEDIA_EXTS:
@@ -284,7 +340,7 @@ def cmd_pending(args):
                 print(f"      - {rel(f)}")
         else:
             print(f"  - {rel(g['files'][0])}")
-    order = ["new", "transcribed", "done", "ignored", "deleted"]
+    order = ["new", "transcribed", "no_speech", "done", "ignored", "deleted"]
     print("Статусы: " + ", ".join(f"{s}={counts.get(s, 0)}" for s in order))
 
 
@@ -473,6 +529,56 @@ def cmd_mark(args):
     print(f"mark: {rel(path)} -> {args.status}")
 
 
+def cmd_publish(args):
+    """Детерминированная публикация: копия конспекта в Obsidian + отметка в БД.
+
+    Заменяет ручное копирование/пометку из LLM-скрипта: агент пишет только локальный
+    файл, а Obsidian-заметка всегда ровно его копия — расхождений и дублей не будет.
+    """
+    src = os.path.abspath(args.konspekt)
+    if not os.path.exists(src):
+        print(f"конспект не найден: {src}", file=sys.stderr)
+        sys.exit(2)
+    obs_rel = args.obsidian.replace("\\", "/")
+    if not obs_rel.startswith("Обсидиан/"):
+        print("путь должен начинаться с 'Обсидиан/' (иначе заметка уйдёт в корень vault): "
+              + obs_rel, file=sys.stderr)
+        sys.exit(2)
+    dst = os.path.join(VAULT, obs_rel.replace("/", os.sep))
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst)
+
+    ts = now()
+    conn = connect()
+    key = os.path.normcase(src)
+    srow = conn.execute(
+        "SELECT id FROM sessions WHERE konspekt_path IS NOT NULL "
+        "AND LOWER(konspekt_path)=?", (key,)).fetchone()
+    if srow:
+        members = conn.execute(
+            "SELECT id FROM files WHERE session_id=?", (srow["id"],)).fetchall()
+        for m in members:
+            conn.execute("UPDATE files SET status='done', summarized_at=?, obsidian_path=? WHERE id=?",
+                         (ts, obs_rel, m["id"]))
+        conn.execute("UPDATE sessions SET obsidian_path=? WHERE id=?", (obs_rel, srow["id"]))
+        conn.commit(); conn.close()
+        print(f"publish: сессия #{srow['id']} -> {obs_rel} ({len(members)} файлов)")
+    else:
+        frow = conn.execute(
+            "SELECT id FROM files WHERE konspekt_path IS NOT NULL "
+            "AND LOWER(konspekt_path)=?", (key,)).fetchone()
+        if frow:
+            conn.execute("UPDATE files SET status='done', summarized_at=?, obsidian_path=? WHERE id=?",
+                         (ts, obs_rel, frow["id"]))
+            conn.commit(); conn.close()
+            print(f"publish: файл -> {obs_rel}")
+        else:
+            conn.close()
+            print(f"publish: скопировано в {obs_rel}, но в БД нет записи с таким "
+                  f"konspekt_path — отметь вручную: {src}", file=sys.stderr)
+            sys.exit(3)
+
+
 def cmd_status(args):
     conn = connect()
     counts = {r["status"]: r["n"] for r in
@@ -506,6 +612,10 @@ def main():
 
     sub.add_parser("status", help="сводка по статусам")
 
+    p_pub = sub.add_parser("publish", help="скопировать готовый конспект в Obsidian и отметить в БД")
+    p_pub.add_argument("konspekt")
+    p_pub.add_argument("--obsidian", required=True)
+
     p_sess = sub.add_parser("session", help="управление сессиями (объединение встреч)")
     ssub = p_sess.add_subparsers(dest="sub", required=True)
     p = ssub.add_parser("auto", help="предложить сессии по зазору времени")
@@ -529,7 +639,7 @@ def main():
          "done": cmd_session_done}[args.sub](args)
         return
     {"sync": cmd_sync, "pending": cmd_pending,
-     "mark": cmd_mark, "status": cmd_status}[args.cmd](args)
+     "mark": cmd_mark, "publish": cmd_publish, "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":

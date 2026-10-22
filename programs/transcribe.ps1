@@ -6,7 +6,7 @@
         powershell -ExecutionPolicy Bypass -File transcribe.ps1 "D:\video_cast\zoom\2026-09-15\Zoom_....m4a"
 
     Опции:
-        -Engine    nemotron (по умолчанию) | whisper   выбор движка транскрибации
+        -Engine    gigaam (по умолчанию) | nemotron | whisper   выбор движка транскрибации
         -Model     whisper: ggml-large-v3-turbo.bin (по умолчанию; скачается при отсутствии)
                    ggml-small.bin - быстрая модель whisper
         -NemoModel nemotron: имя/путь GGUF (по умолчанию nemotron-3.5, из каталога моделей)
@@ -19,6 +19,9 @@
         -ChunkSeconds N  длина куска для фолбэка whisper, сек (по умолчанию 600)
         -NoFallback  не использовать нарезку + ggml-small при сбое whisper
                    (и не откатываться nemotron -> whisper)
+        -GigaamModel     каталог модели GigaAM (по умолчанию models\gigaam-v3-e2e-rnnt)
+        -GigaamProvider  auto (по умолчанию; cuda -> dml -> cpu) | cuda | dml | cpu
+        -GigaamPython    путь к python из venv GigaAM (по умолчанию .venv-gigaam\Scripts\python.exe)
 
     Форматы входа: m4a, webm, mp4, wav, mp3, ogg и др. (декодирует ffmpeg).
     Результат: <имя>.txt и <имя>.srt (таймкоды) рядом с исходным файлом.
@@ -26,8 +29,8 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$File,
-    [ValidateSet("nemotron", "whisper")]
-    [string]$Engine = "nemotron",
+    [ValidateSet("nemotron", "whisper", "gigaam")]
+    [string]$Engine = "gigaam",
     [string]$Model = "ggml-large-v3-turbo.bin",
     [string]$NemoModel = "nemotron-3.5",
     [string]$NemoDevice = "cpu",
@@ -37,11 +40,16 @@ param(
     [switch]$DeleteTxt,
     [int]$Retries = 2,
     [int]$ChunkSeconds = 600,
-    [switch]$NoFallback
+    [switch]$NoFallback,
+    [string]$GigaamModel = "",
+    [string]$GigaamProvider = "auto",
+    [string]$GigaamPython = ""
 )
 
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 $WhisperCli    = "C:\Users\lega\.cache\opencode-voice\engines\whisper.cpp\win32-x64\whisper-cli.exe"
 $ModelDir      = "D:\video_cast\zoom\models"
@@ -116,7 +124,7 @@ if (-not (Test-Path -LiteralPath $File)) { throw "Файл не найден: $F
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { throw "ffmpeg не найден в PATH" }
 if ($Engine -eq "whisper") {
     if (-not (Test-Path -LiteralPath $WhisperCli)) { throw "whisper-cli не найден: $WhisperCli" }
-} else {
+} elseif ($Engine -eq "nemotron") {
     if (-not $NemoCli) { throw "nemo-speech не найден. Установите NeMo-Speech.cpp (см. README) или укажите -Engine whisper" }
 }
 
@@ -147,8 +155,13 @@ function Init-Whisper {
 
 function Invoke-Whisper([string]$modelPath, [string]$audio, [string]$prefix) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & $WhisperCli -m "$modelPath" -l $Lang -t $Threads @vadArgs -otxt -osrt -pp -of "$prefix" "$audio" | Write-Host
+    # stderr whisper-cli собираем и выводим обычным текстом (без красных NativeCommandError при ErrorActionPreference=Stop)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $WhisperCli -m "$modelPath" -l $Lang -t $Threads @vadArgs -otxt -osrt -pp -of "$prefix" "$audio" 2>&1 |
+        ForEach-Object { Write-Host ([string]$_) }
     $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
     $sw.Stop()
     Write-Host ("  whisper-cli: код {0}, время {1:hh\:mm\:ss}" -f $code, $sw.Elapsed) -ForegroundColor DarkGray
     return $code
@@ -217,14 +230,44 @@ function Invoke-NemotronPipeline([string]$audio, [string]$prefix) {
     $env:NEMO_SPEECH_MODEL_DIR = $ModelDir
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Write-Host "Транскрибирую nemotron (модель: $NemoModel, язык: $Lang, устройство: $NemoDevice)..." -ForegroundColor Cyan
-    & $NemoCli transcribe "$audio" --model $NemoModel --language $Lang --device $NemoDevice --format srt --output "$prefix.srt" | Write-Host
+    # --stream обязателен: без него nemo-speech для коротких файлов уходит в mode=offline
+    # и зависает (баг offline-режима Nemotron 3.5 на CPU). Streaming работает для файлов любой длины.
+    # nemo-speech пишет прогресс в stderr: собираем его вместе с stdout и выводим обычным текстом,
+    # иначе PowerShell (из-за $ErrorActionPreference="Stop") рендерит stderr красным NativeCommandError.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $NemoCli transcribe "$audio" --model $NemoModel --language $Lang --device $NemoDevice --stream --format srt --output "$prefix.srt" 2>&1 |
+        ForEach-Object { Write-Host ([string]$_) }
     $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
     $sw.Stop()
     Write-Host ("  nemo-speech: код {0}, время {1:hh\:mm\:ss}" -f $code, $sw.Elapsed) -ForegroundColor DarkGray
     if ($code -eq 0 -and (Test-Path -LiteralPath "$prefix.srt")) {
         Get-TxtFromSrt "$prefix.srt" "$prefix.txt"
         return $true
     }
+    return $false
+}
+
+# gigaam: python-хелпер (onnx-asr, DirectML/CPU) на 16 кГц WAV.
+function Invoke-GigaamPipeline([string]$audio, [string]$prefix) {
+    $repoRoot = Split-Path -Parent $ModelDir
+    $pyExe = $GigaamPython
+    if (-not $pyExe) { $pyExe = Join-Path $repoRoot ".venv-gigaam\Scripts\python.exe" }
+    if (-not (Test-Path -LiteralPath $pyExe)) { $pyExe = "python" }
+    $gModelDir = $GigaamModel
+    if (-not $gModelDir) { $gModelDir = Join-Path $ModelDir "gigaam-v3-e2e-rnnt" }
+    $helper = Join-Path $repoRoot "programs\transcribe_gigaam.py"
+    Write-Host "Транскрибирую gigaam (onnx-asr, provider: $GigaamProvider)..." -ForegroundColor Cyan
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $pyExe $helper $audio --out-prefix $prefix --model-dir $gModelDir --provider $GigaamProvider 2>&1 |
+        ForEach-Object { Write-Host ([string]$_) }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($code -eq 0 -and (Test-Path -LiteralPath "$prefix.srt")) { return $true }
     return $false
 }
 
@@ -246,6 +289,17 @@ if ($Engine -eq "nemotron") {
         } else {
             Write-Host "nemotron не справился. Откат на whisper..." -ForegroundColor Yellow
             $ok = Invoke-WhisperPipeline $wav $outPrefix
+        }
+    }
+} elseif ($Engine -eq "gigaam") {
+    $ok = Invoke-GigaamPipeline $wav $outPrefix
+    if (-not $ok) {
+        if ($NoFallback) {
+            Write-Host "gigaam не справился (фолбэк отключён -NoFallback)." -ForegroundColor Red
+        } else {
+            Write-Host "gigaam не справился. Откат на nemotron..." -ForegroundColor Yellow
+            $ok = Invoke-NemotronPipeline $wav $outPrefix
+            if (-not $ok) { $ok = Invoke-WhisperPipeline $wav $outPrefix }
         }
     }
 } else {

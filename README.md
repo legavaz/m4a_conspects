@@ -19,10 +19,13 @@
 |---|---|
 | `zoom_recorder.py` | основной скрипт-наблюдатель и рекордер |
 | `install.ps1` | установка зависимостей и настройка автозапуска «с нуля» |
-| `transcribe.ps1` | локальная транскрибация одной записи (движки: NVIDIA Nemotron 3.5 ASR / whisper.cpp, без облака) |
+| `transcribe.ps1` | локальная транскрибация одной записи (движки: GigaAM-v3 e2e-RNN-T / NVIDIA Nemotron 3.5 ASR / whisper.cpp, без облака) |
 | `transcribe-all.ps1` | пакетная транскрибация всех новых записей в папке |
 | `zoom_state.py` | БД состояния обработки (SQLite): sync / pending / mark / status |
 | `konspekt.ps1` (корень проекта) | автономный (headless) запуск конспекта через `opencode run` |
+| `hourly.ps1` | почасовой цикл: транскрибация новых записей (GigaAM) → создание конспектов |
+| `install-hourly.ps1` | регистрация/удаление задания планировщика `ZoomHourlyTranscribe` (каждый час, скрытый запуск) |
+| `run-hidden.vbs` | обёртка для планировщика: запускает `hourly.ps1` без окна (не перекрывает другие окна) |
 | `konspekt-command.md` | промпт автономного конспекта (вызывается `konspekt.ps1` по регламенту `prompt-konspekt.md`) |
 | `prompt-konspekt.md` | стандартный промпт для конспекта встречи (opencode) |
 | `README.md` | этот файл |
@@ -45,34 +48,57 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 ## Результат
 
-- Записи: `D:\video_cast\zoom\ГГГГ-ММ-ДД\Zoom_ДАТА_ВРЕМЯ.m4a` (подпапка текущего дня)
+- Записи: `D:\video_cast\zoom\ГГГГ\ММ\ГГГГ-ММ-ДД\Zoom_ГГГГММДД_ЧЧММСС.m4a` (год/месяц/день — как в Obsidian)
 - Лог: `D:\video_cast\zoom\recorder.log`
 - Автозапуск: ярлык `ZoomRecorder.lnk` в папке «Автозагрузка» (`shell:startup`), запуск через `pythonw` — без окна.
 
 ## Конспект встречи (транскрибация + суммаризация)
 
-Транскрибация — полностью локальная (токены LLM не расходуются). Доступны **два движка**:
+Транскрибация — полностью локальная (токены LLM не расходуются). Доступны **три движка**:
 
-- **Nemotron 3.5 ASR** (по умолчанию) — NVIDIA, `nemo-speech` (NeMo-Speech.cpp, нативный C++/ggml). Быстрее (~0.5x realtime на CPU), но на русской речи с именами/1С-терминами может терять точность (модель 0.6B).
-- **whisper.cpp** (`-Engine whisper`) — точнее на русском (large-v3-turbo, 809M), но медленнее (~0.9x realtime). Используется как автоматический резерв при сбое Nemotron.
+- **GigaAM-v3 e2e-RNN-T** (по умолчанию, `-Engine gigaam`) — русскоязычная модель Sber/Salute (Conformer + RNN-T, ~180M, MIT), выход **с пунктуацией и регистром**. Длинные записи нарезаются по тишине (Silero VAD), поэтому подходит для встреч любой длины. Работает через `onnx-asr` в отдельном venv; ускорение на GPU через **DirectML** (CUDA невозможна на текущем драйвере — см. ниже). Порядок ~**30x realtime** на GPU (RTX 5050) / ~16x на CPU.
+- **Nemotron 3.5 ASR** (`-Engine nemotron`) — NVIDIA, `nemo-speech` (NeMo-Speech.cpp, нативный C++/ggml). Быстрее (~0.5x realtime на CPU), но на русской речи с именами/1С-терминами может терять точность (модель 0.6B).
+- **whisper.cpp** (`-Engine whisper`) — точнее Nemotron (large-v3-turbo, 809M), но медленнее (~0.9x realtime). Используется как автоматический резерв при сбое GigaAM/Nemotron.
 
 ```powershell
-# одна запись (по умолчанию Nemotron)
-powershell -ExecutionPolicy Bypass -File transcribe.ps1 "D:\video_cast\zoom\ГГГГ-ММ-ДД\Zoom_....m4a"
-# принудительно whisper
-powershell -ExecutionPolicy Bypass -File transcribe.ps1 "D:\video_cast\zoom\ГГГГ-ММ-ДД\Zoom_....m4a" -Engine whisper
+# одна запись (по умолчанию GigaAM)
+powershell -ExecutionPolicy Bypass -File transcribe.ps1 "D:\video_cast\zoom\ГГГГ\ММ\ГГГГ-ММ-ДД\Zoom_....m4a"
+# принудительно nemotron / whisper
+powershell -ExecutionPolicy Bypass -File transcribe.ps1 "..." -Engine nemotron
+powershell -ExecutionPolicy Bypass -File transcribe.ps1 "..." -Engine whisper
 # вся папка (все новые записи)
-powershell -ExecutionPolicy Bypass -File transcribe-all.ps1 "D:\video_cast\zoom\ГГГГ-ММ-ДД"
+powershell -ExecutionPolicy Bypass -File transcribe-all.ps1 "D:\video_cast\zoom\ГГГГ\ММ\ГГГГ-ММ-ДД"
 ```
 
-- **Nemotron**: модель `nemotron-3.5` (GGUF Q8 ~707 МБ) лежит в `D:\video_cast\zoom\models` (подкаталог `nvidia\...`). Опции: `-NemoModel` (имя/путь), `-NemoDevice` (по умолч. `cpu`; `auto|cuda|vulkan`), язык — `-Lang` (`ru`). SRT-куски дробятся по границам предложений/пауз; `.txt` собирается из `.srt` одним проходом.
+- **GigaAM**: модель `gigaam-v3-e2e-rnnt` (fp32, ~890 МБ) в `D:\video_cast\zoom\models\gigaam-v3-e2e-rnnt`; интерпретатор — `D:\video_cast\zoom\.venv-gigaam\Scripts\python.exe`. Опции: `-GigaamModel` (каталог), `-GigaamProvider` (`auto` (по умолч.; cuda→dml→cpu) | `cuda` | `dml` | `cpu`), `-GigaamPython` (путь к python). Реализация — `programs\transcribe_gigaam.py` (onnx-asr + Silero VAD; пишет `.txt` и `.srt` по речевым сегментам). Установка окружения: `uv venv --python 3.12 .venv-gigaam` + `uv pip install --python .venv-gigaam\Scripts\python.exe "onnx-asr[hub]" onnxruntime-directml`.
+
 - **whisper**: модель по умолчанию `ggml-large-v3-turbo` (лежит в `D:\video_cast\zoom\models`; при отсутствии скачается автоматически). Черновой быстрый вариант: `-Model ggml-small.bin`. Опции: `-NoVad`, `-Retries`, `-ChunkSeconds`, `-NoFallback`.
 - Вход: `m4a`, `webm`, `mp4`, `mp3`, `wav`, `ogg`, `m4b` (декодирует ffmpeg).
 - Результат: `<имя>.txt` и `<имя>.srt` (таймкоды) рядом с записью.
-- Надёжность whisper: при сбое — автоповторы (`-Retries`), затем фолбэк (нарезка `-ChunkSeconds` + `ggml-small`) со склейкой `.txt`/`.srt`. При сбое Nemotron — автооткат на whisper (если не указан `-NoFallback`).
-- Конспект делает opencode (LLM): в чате **`Конспект: <путь к .m4a>`** (или **`Конспект: <папка>`**) → транскрибация → Markdown-конспект (участники, темы с таймкодами из `.srt`, решения, ❗важное с ==подсветкой==) сохраняется рядом с аудио и в Obsidian `Обсидиан/Встречи Zoom/ГГГГ/ММ/ГГГГ-ММ-ДД/ЧЧ-ММ — тема.md`.
+- Надёжность whisper: при сбое — автоповторы (`-Retries`), затем фолбэк (нарезка `-ChunkSeconds` + `ggml-small`) со склейкой `.txt`/`.srt`. При сбое GigaAM — автооткат на Nemotron, затем на whisper; при сбое Nemotron — автооткат на whisper (если не указан `-NoFallback`).
+- Конспект делает opencode (LLM): в чате **`Конспект: <путь к .m4a>`** (или **`Конспект: <папка>`**) → транскрибация → Markdown-конспект в стиле executive summary (обзорный абзац, **Ключевые решения**, **Важные обновления статуса** с `==подсветкой==` цифр, **Следующие шаги**, **Открытые вопросы**; короткая хронология с таймкодами — опционально) сохраняется рядом с аудио и в Obsidian `Обсидиан/Встречи Zoom/ГГГГ/ММ/ГГГГ-ММ-ДД/ЧЧ-ММ — тема.md`.
 - Полный текст промпта: `prompt-konspekt.md`.
-- **Автономный запуск (без чата)**: `powershell -ExecutionPolicy Bypass -File konspekt.ps1 [-Target <папка|файл>] [-NoPause]` — запускает `opencode run --agent build --auto` с промптом из `programs\konspekt-command.md` и обрабатывает все готовые записи из `pending`; без `-Target` — весь проект, `-NoPause` — не ждать Enter (для планировщика).
+- **Автономный запуск (без чата)**: `powershell -ExecutionPolicy Bypass -File konspekt.ps1 [-Target <папка|файл>] [-NoPause] [-Model "m1,m2,..."]` — запускает `opencode run --agent build --auto` с промптом из `programs\konspekt-command.md` и обрабатывает все готовые записи из `pending`; без `-Target` — весь проект, `-NoPause` — не ждать Enter (для планировщика). `-Model` — цепочка моделей через запятую, перебирается до первого успеха (по умолчанию Big Pickle → бесплатная → платная), защищает от исчерпанных лимитов провайдера.
+- **Публикация в Obsidian**: конспект пишется только рядом с аудио, заметку создаёт команда `python programs\zoom_state.py publish "<конспект>" --obsidian "Обсидиан/Встречи Zoom/ГГГГ\ММ\ГГГГ-ММ-ДД\ЧЧ-ММ — тема.md"` — она копирует файл в vault и проставляет в БД `obsidian_path`/`done`. Писать заметку в Obsidian вручную нельзя: получаются дубли и расхождения с локальным файлом.
+
+## Почасовой автозапуск (Task Scheduler)
+
+Задание раз в час транскрибирует новые записи и создаёт конспекты:
+
+- `programs\hourly.ps1` — сам цикл: `sync` → транскрибация всех записей без `.txt` (движок по умолчанию GigaAM; пропускает файлы, изменённые за последние `-MinAgeMinutes` минут, чтобы не трогать идущую запись) → если есть `ready_for_konspekt`, запускает `konspekt.ps1`. Защищён мьютексом (без наложений), пишет лог `programs\hourly.log`.
+- `programs\install-hourly.ps1` — регистрирует/снимает задание `ZoomHourlyTranscribe` (каждый час, от имени текущего пользователя, только при входе в сеанс). Задание запускает `wscript.exe //B //Nologo programs\run-hidden.vbs`: окно PowerShell скрыто, поэтому почасовой прогон не всплывает и не перехватывает фокус.
+
+```powershell
+# установить/обновить задание
+powershell -ExecutionPolicy Bypass -File programs\install-hourly.ps1
+# удалить задание
+powershell -ExecutionPolicy Bypass -File programs\install-hourly.ps1 -Remove
+# разовый ручной прогон (без ожидания Enter)
+powershell -ExecutionPolicy Bypass -File programs\hourly.ps1 -NoPause
+```
+
+- Опции `hourly.ps1`: `-MinAgeMinutes 10` (возраст файла), `-SkipTranscribe`, `-SkipKonspekt` (для отладки), `-NoPause`.
+- Запуск конспекта требует `opencode` в `PATH` (как и `konspekt.ps1`).
 
 ## Состояние обработки (SQLite)
 
@@ -86,7 +112,7 @@ python programs\zoom_state.py status     # сводка по статусам
 python programs\zoom_state.py mark "<аудио>" done --konspekt "<путь>" --obsidian "<путь>"
 ```
 
-- **Статусы**: `new` (нет транскрипта) → `transcribed` (есть `.txt`/`.srt`) → `done` (есть `_конспект.md`); `deleted` (файл пропал).
+- **Статусы**: `new` (нет транскрипта) → `transcribed` (есть `.txt`/`.srt`) → `done` (есть `_конспект.md`); `no_speech` (движок отработал, но оба файла пустые — запись без речи, повторно не гоняется); `deleted` (файл пропал).
 - **Детект изменений**: `sync` сравнивает `size`/`mtime`; если запись перезаписана — статус сбрасывается в `new`.
 - **Никакой авто-транскрибации**: `sync`/`pending` только фиксируют состояние. Файлы без транскрипта пропускаются; транскрибация — отдельно и только по явной просьбе.
 

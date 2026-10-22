@@ -161,7 +161,7 @@ class Recorder:
     def start(self):
         loopback, mic = self._open_devices()
         now = datetime.now()
-        day_dir = os.path.join(self.output_dir, now.strftime("%Y-%m-%d"))
+        day_dir = os.path.join(self.output_dir, now.strftime("%Y"), now.strftime("%m"), now.strftime("%Y-%m-%d"))
         os.makedirs(day_dir, exist_ok=True)
         name = "Zoom_" + now.strftime("%Y%m%d_%H%M%S") + ".m4a"
         self.path = os.path.join(day_dir, name)

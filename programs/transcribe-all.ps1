@@ -10,63 +10,89 @@
 
     Опции:
         -Path      папка с записями
-        -Engine    nemotron (по умолчанию) | whisper
+        -Engine    gigaam (по умолчанию) | nemotron | whisper
         -Model     whisper: модель (по умолчанию ggml-large-v3-turbo.bin)
         -NemoModel nemotron: имя/путь GGUF (по умолчанию nemotron-3.5)
         -NemoDevice nemotron: cpu (по умолчанию) | auto | cuda | vulkan
         -DeleteTxt удалять .txt после транскрибации (оставить .srt с таймкодами)
         -NoVad     отключить Voice Activity Detection
         -Force     перетранскрибировать даже если .txt уже есть
+        -NoPause   не ждать Enter в конце (для автоматизации; при перенаправленном вводе пауза и так не срабатывает)
 #>
 param(
     [string]$Path = "",
-    [ValidateSet("nemotron", "whisper")]
-    [string]$Engine = "nemotron",
+    [ValidateSet("nemotron", "whisper", "gigaam")]
+    [string]$Engine = "gigaam",
     [string]$Model = "ggml-large-v3-turbo.bin",
     [string]$NemoModel = "nemotron-3.5",
     [string]$NemoDevice = "cpu",
     [switch]$DeleteTxt,
     [switch]$NoVad,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoPause
 )
 
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
-if (-not $Path) {
-    $Path = Join-Path "D:\video_cast\zoom" (Get-Date -Format "yyyy-MM-dd")
-}
-if (-not (Test-Path -LiteralPath $Path)) { throw "Папка не найдена: $Path" }
-
-$Script = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "transcribe.ps1"
-$exts = @(".m4a", ".webm", ".mp4", ".mp3", ".wav", ".ogg", ".m4b")
-
-$files = @(Get-ChildItem -LiteralPath $Path -File |
-    Where-Object { $exts -contains $_.Extension.ToLower() } |
-    Sort-Object Name)
-
-Write-Host ("Найдено записей: {0} в {1}" -f $files.Count, $Path) -ForegroundColor Cyan
-if ($files.Count -eq 0) { exit 0 }
-
-$done = 0; $failed = 0; $skipped = 0
-foreach ($f in $files) {
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-    $have = Test-Path -LiteralPath (Join-Path $Path ($base + ".txt"))
-    if ($have -and -not $Force) {
-        Write-Host ("Пропускаю (уже есть .txt): {0}" -f $f.Name) -ForegroundColor DarkGray
-        $skipped++
-        continue
+# Пауза перед закрытием окна (важно при запуске двойным кликом по ярлыку),
+# чтобы были видны итог и ошибки. Пропускается при -NoPause или перенаправленном вводе.
+function Stop-WithPause([int]$code) {
+    if (-not $NoPause -and -not [Console]::IsInputRedirected) {
+        Write-Host ""
+        Read-Host 'Press Enter to close' | Out-Null
     }
-    Write-Host ("`n=== {0} ===" -f $f.Name) -ForegroundColor Magenta
-    $passArgs = @("-File", "`"$($f.FullName)`"", "-Engine", $Engine, "-Model", $Model)
-    if ($Engine -eq "nemotron") {
-        $passArgs += @("-NemoModel", $NemoModel, "-NemoDevice", $NemoDevice)
-    }
-    if ($DeleteTxt) { $passArgs += "-DeleteTxt" }
-    if ($NoVad)     { $passArgs += "-NoVad" }
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Script @passArgs
-    if ($LASTEXITCODE -eq 0) { $done++ } else { $failed++ }
+    exit $code
 }
 
-Write-Host ("`nИтог: обработано {0}, пропущено {1}, ошибок {2}" -f $done, $skipped, $failed) -ForegroundColor Green
-exit $failed
+$rc = 0
+try {
+    if (-not $Path) {
+        $Path = Join-Path "D:\video_cast\zoom" (Get-Date -Format "yyyy")
+        $Path = Join-Path $Path (Get-Date -Format "MM")
+        $Path = Join-Path $Path (Get-Date -Format "yyyy-MM-dd")
+    }
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Папка не найдена: $Path" }
+
+    $Script = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "transcribe.ps1"
+    $exts = @(".m4a", ".webm", ".mp4", ".mp3", ".wav", ".ogg", ".m4b")
+
+    $files = @(Get-ChildItem -LiteralPath $Path -File |
+        Where-Object { $exts -contains $_.Extension.ToLower() } |
+        Sort-Object Name)
+
+    Write-Host ("Найдено записей: {0} в {1}" -f $files.Count, $Path) -ForegroundColor Cyan
+
+    if ($files.Count -eq 0) {
+        Write-Host "Нет записей для обработки." -ForegroundColor Yellow
+        Stop-WithPause 0
+    }
+
+    $done = 0; $failed = 0; $skipped = 0
+    foreach ($f in $files) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
+        $have = Test-Path -LiteralPath (Join-Path $Path ($base + ".txt"))
+        if ($have -and -not $Force) {
+            Write-Host ("Пропускаю (уже есть .txt): {0}" -f $f.Name) -ForegroundColor DarkGray
+            $skipped++
+            continue
+        }
+        Write-Host ("`n=== {0} ===" -f $f.Name) -ForegroundColor Magenta
+        $passArgs = @("-File", "`"$($f.FullName)`"", "-Engine", $Engine, "-Model", $Model)
+        if ($Engine -eq "nemotron") {
+            $passArgs += @("-NemoModel", $NemoModel, "-NemoDevice", $NemoDevice)
+        }
+        if ($DeleteTxt) { $passArgs += "-DeleteTxt" }
+        if ($NoVad)     { $passArgs += "-NoVad" }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $Script @passArgs
+        if ($LASTEXITCODE -eq 0) { $done++ } else { $failed++ }
+    }
+
+    Write-Host ("`nИтог: обработано {0}, пропущено {1}, ошибок {2}" -f $done, $skipped, $failed) -ForegroundColor Green
+    $rc = $failed
+}
+catch {
+    Write-Host ("`nОШИБКА: " + $_.Exception.Message) -ForegroundColor Red
+    $rc = 1
+}
+Stop-WithPause $rc
