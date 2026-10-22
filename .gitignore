@@ -44,3 +44,6 @@ __pycache__/
 # Zoom recordings: YYYY/MM/YYYY-MM-DD (new layout)
 /[0-9][0-9][0-9][0-9]/
 /*.lnk
+
+# Локальная память проекта (не версионируется)
+/programs/MEMORY.md
