@@ -17,17 +17,19 @@
 
 | Файл | Назначение |
 |---|---|
-| `zoom_recorder.py` | основной скрипт-наблюдатель и рекордер |
-| `install.ps1` | установка зависимостей и настройка автозапуска «с нуля» |
-| `transcribe.ps1` | локальная транскрибация одной записи (движки: GigaAM-v3 e2e-RNN-T / NVIDIA Nemotron 3.5 ASR / whisper.cpp, без облака) |
-| `transcribe-all.ps1` | пакетная транскрибация всех новых записей в папке |
-| `zoom_state.py` | БД состояния обработки (SQLite): sync / pending / mark / status |
-| `konspekt.ps1` (корень проекта) | автономный (headless) запуск конспекта через `opencode run` |
-| `hourly.ps1` | почасовой цикл: транскрибация новых записей (GigaAM) → создание конспектов |
-| `install-hourly.ps1` | регистрация/удаление задания планировщика `ZoomHourlyTranscribe` (каждый час, скрытый запуск) |
-| `run-hidden.vbs` | обёртка для планировщика: запускает `hourly.ps1` без окна (не перекрывает другие окна) |
-| `konspekt-command.md` | промпт автономного конспекта (вызывается `konspekt.ps1` по регламенту `prompt-konspekt.md`) |
-| `prompt-konspekt.md` | стандартный промпт для конспекта встречи (opencode) |
+| `konspekt.ps1` | автономный (headless) запуск конспекта через `opencode run` (в корне проекта) |
+| `programs\zoom_recorder.py` | основной скрипт-наблюдатель и рекордер |
+| `programs\install.ps1` | установка зависимостей и настройка автозапуска «с нуля» |
+| `programs\transcribe.ps1` | локальная транскрибация одной записи (движки: GigaAM-v3 e2e-RNN-T / NVIDIA Nemotron 3.5 ASR / whisper.cpp, без облака) |
+| `programs\transcribe_gigaam.py` | хелпер движка GigaAM (onnx-asr + Silero VAD; DirectML/CPU) |
+| `programs\transcribe-all.ps1` | пакетная транскрибация всех новых записей в папке |
+| `programs\zoom_state.py` | БД состояния обработки (SQLite): sync / pending / mark / publish / status / session |
+| `programs\hourly.ps1` | почасовой цикл: транскрибация новых записей (GigaAM) → создание конспектов |
+| `programs\install-hourly.ps1` | регистрация/удаление задания планировщика `ZoomHourlyTranscribe` (каждый час, скрытый запуск) |
+| `programs\run-hidden.vbs` | обёртка для планировщика: запускает `hourly.ps1` без окна (не перекрывает другие окна) |
+| `programs\konspekt-command.md` | промпт автономного конспекта (вызывается `konspekt.ps1` по регламенту `prompt-konspekt.md`) |
+| `programs\prompt-konspekt.md` | стандартный промпт для конспекта встречи (opencode) |
+| `programs\MEMORY.md` | память проекта: факты, уроки, журнал обработки |
 | `README.md` | этот файл |
 
 ## Зависимости
@@ -85,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File transcribe-all.ps1 "D:\video_cast\zoom\
 
 Задание раз в час транскрибирует новые записи и создаёт конспекты:
 
-- `programs\hourly.ps1` — сам цикл: `sync` → транскрибация всех записей без `.txt` (движок по умолчанию GigaAM; пропускает файлы, изменённые за последние `-MinAgeMinutes` минут, чтобы не трогать идущую запись) → если есть `ready_for_konspekt`, запускает `konspekt.ps1`. Защищён мьютексом (без наложений), пишет лог `programs\hourly.log`.
+- `programs\hourly.ps1` — сам цикл: `sync` → транскрибация всех записей в статусе `new` (движок по умолчанию GigaAM; пропускает файлы, изменённые за последние `-MinAgeMinutes` минут, чтобы не трогать идущую запись; записи без речи получают `no_speech` и больше не гоняются) → если есть `ready_for_konspekt`, запускает `konspekt.ps1`. Защищён мьютексом (без наложений), пишет лог `programs\hourly.log`.
 - `programs\install-hourly.ps1` — регистрирует/снимает задание `ZoomHourlyTranscribe` (каждый час, от имени текущего пользователя, только при входе в сеанс). Задание запускает `wscript.exe //B //Nologo programs\run-hidden.vbs`: окно PowerShell скрыто, поэтому почасовой прогон не всплывает и не перехватывает фокус.
 
 ```powershell
@@ -114,7 +116,7 @@ python programs\zoom_state.py mark "<аудио>" done --konspekt "<путь>" -
 
 - **Статусы**: `new` (нет транскрипта) → `transcribed` (есть `.txt`/`.srt`) → `done` (есть `_конспект.md`); `no_speech` (движок отработал, но оба файла пустые — запись без речи, повторно не гоняется); `deleted` (файл пропал).
 - **Детект изменений**: `sync` сравнивает `size`/`mtime`; если запись перезаписана — статус сбрасывается в `new`.
-- **Никакой авто-транскрибации**: `sync`/`pending` только фиксируют состояние. Файлы без транскрипта пропускаются; транскрибация — отдельно и только по явной просьбе.
+- **Автоматическая транскрибация — только в почасовом задании** (`hourly.ps1`): оно берёт записи со статусом `new`, поэтому очередь не растёт и файлы не обрабатываются повторно. `sync`/`pending` сами ничего не транскрибируют; ручная транскрибация — отдельно и только с согласия пользователя.
 
 ## Настройки
 
